@@ -1,0 +1,16 @@
+# Eliis · 默认配置
+#
+# 文档：DESIGN.md / STATUS.md
+# 启动：go run ./cmd/eliis -config configs/eliis.yaml
+
+server:
+  # HTTP 监听地址；":8090" 表示监听所有网卡的 8090 端口
+  addr: ":8090"
+
+log:
+  # 日志级别：debug | info | warn | error
+  # debug 级别会额外输出每个请求的访问日志（method/path/status/latency）
+  level: debug
+
+  # 输出格式：text（开发可读） | json（生产可观测性）
+  format: json

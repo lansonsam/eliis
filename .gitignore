@@ -1,0 +1,98 @@
+# ===============================================
+# Reference-only directories (excluded from Git)
+# ===============================================
+# new-api 仅作为参考代码，不纳入版本控制
+new-api/
+!new-api/.gitkeep
+
+# eino (cloudwego/eino) 仅作为参考代码，不纳入版本控制
+eino/
+!eino/.gitkeep
+
+# ===============================================
+# Local AI assistant config (本地 AI 助手配置，不入库)
+# ===============================================
+# Cursor 的忽略规则（仅本地生效，不分享给团队）
+.cursorignore
+.cursorindexingignore
+DESIGN.md
+
+# Claude Code 的项目指令文件（按需本地化）
+CLAUDE.md
+
+# ===============================================
+# Common
+# ===============================================
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# ===============================================
+# Node / Frontend
+# ===============================================
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+out/
+coverage/
+.cache/
+.parcel-cache/
+.turbo/
+.vite/
+
+# ===============================================
+# Python
+# ===============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===============================================
+# Go
+# ===============================================
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# ===============================================
+# Misc
+# ===============================================
+tmp/
+temp/
+*.bak
+*.tmp
