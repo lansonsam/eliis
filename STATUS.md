@@ -39,7 +39,7 @@
 
 | 项 | 路径 | 状态 |
 | --- | --- | --- |
-| Git 仓库初始化 | `.git/` | ✅ master 分支，**0 commit**（尚未首次提交） |
+| Git 仓库初始化 | `.git/` | ✅ master 分支，已首次提交（root-commit `3e04ad0`） |
 | 参考代码不入库 | `.gitignore` | ✅ `new-api/` + `eino/` 不入库 |
 | 参考代码不索引 | `.cursorindexingignore` | ✅ `new-api/` + `eino/` 不参与 codebase 搜索 |
 | AI 完全屏蔽列表 | `.cursorignore` | ✅ 当前仅占位（参考代码改用"可读不可写"策略） |
@@ -93,7 +93,7 @@ test/e2e/                       仅 .gitkeep
 - [x] **`cmd/eliis/main.go`** —— 已建，Gin server 可启动 ✅
 - [x] **填充 `UnifiedRequest/Response/Chunk` 字段** —— IR 已定型，覆盖三协议字段 ✅
 - [x] **`docs/IR.md`** —— 三协议字段对照表 + Extra 约定 + Parts/ToolCalls 不变量 ✅
-- [ ] **首次 git commit** —— 当前 0 commit，建议把骨架 + IR 一起 commit 作为基准
+- [x] **首次 git commit** —— root-commit `3e04ad0`，骨架 + IR 一起入库 ✅
 
 ### 2.2 M1 · OpenAI passthrough（最小闭环）
 
