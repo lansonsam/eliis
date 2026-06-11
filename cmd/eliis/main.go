@@ -1,8 +1,8 @@
 // Package main is the eliis gateway entrypoint.
 //
-// M0.5 milestone: load config, start a Gin HTTP server with /health,
-// support graceful shutdown on SIGINT/SIGTERM. Real protocol handlers
-// will be wired in later milestones (see DESIGN.md §8).
+// M1 milestone: load config, start a Gin HTTP server with /health, support
+// Anthropic Messages ingress backed by an OpenAI-compatible upstream, and
+// gracefully shutdown on SIGINT/SIGTERM.
 package main
 
 import (
@@ -19,7 +19,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	backendopenai "github.com/lansonsam/eliis/internal/backend/openai"
 	"github.com/lansonsam/eliis/internal/core/config"
+	"github.com/lansonsam/eliis/internal/core/contract"
+	"github.com/lansonsam/eliis/internal/protocol/anthropic"
+	"github.com/lansonsam/eliis/internal/protocol/lens"
 )
 
 const (
@@ -48,7 +52,11 @@ func main() {
 	}
 	slog.SetDefault(logger)
 
-	router := buildRouter()
+	router, err := buildRouter(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to build router: %v\n", err)
+		os.Exit(1)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Addr,
@@ -133,7 +141,7 @@ func parseLevel(s string) (slog.Level, error) {
 	}
 }
 
-func buildRouter() *gin.Engine {
+func buildRouter(cfg *config.Root) (*gin.Engine, error) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -155,7 +163,95 @@ func buildRouter() *gin.Engine {
 		})
 	})
 
-	return r
+	if cfg == nil {
+		return r, nil
+	}
+	app, err := newApp(cfg)
+	if err != nil {
+		return nil, err
+	}
+	r.POST("/v1/messages", app.handleAnthropicMessages)
+
+	return r, nil
+}
+
+type app struct {
+	anthropicCodec *anthropic.Codec
+	backend        contract.Backend
+	lensChain      contract.LensChain
+}
+
+func newApp(cfg *config.Root) (*app, error) {
+	if cfg.Routes.AnthropicMessages.Backend != "openai" {
+		return nil, fmt.Errorf("unsupported anthropic_messages backend %q", cfg.Routes.AnthropicMessages.Backend)
+	}
+	timeout, err := cfg.Upstreams.OpenAI.TimeoutDuration()
+	if err != nil {
+		return nil, err
+	}
+	backend := backendopenai.New(backendopenai.Config{
+		BaseURL: cfg.Upstreams.OpenAI.BaseURL,
+		APIKey:  cfg.Upstreams.OpenAI.APIKey,
+		Timeout: timeout,
+	})
+	return &app{
+		anthropicCodec: anthropic.NewCodec(),
+		backend:        backend,
+		lensChain: contract.LensChain{
+			lens.OverrideModel{Model: cfg.Routes.AnthropicMessages.Model},
+			lens.EnsureMaxTokens{Default: cfg.Routes.AnthropicMessages.DefaultMaxTokens},
+		},
+	}, nil
+}
+
+func (a *app) handleAnthropicMessages(c *gin.Context) {
+	req, err := a.anthropicCodec.DecodeRequest(c.Request)
+	if err != nil {
+		anthropic.WriteError(c.Writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if req.Stream {
+		anthropic.WriteError(c.Writer, http.StatusBadRequest, "invalid_request_error", "streaming is not implemented yet")
+		return
+	}
+	if err := a.lensChain.Apply(req); err != nil {
+		anthropic.WriteError(c.Writer, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	resp, err := a.backend.Invoke(c.Request.Context(), req)
+	if err != nil {
+		status, typ := mapBackendError(err)
+		anthropic.WriteError(c.Writer, status, typ, err.Error())
+		return
+	}
+	if err := a.anthropicCodec.EncodeResponse(resp, c.Writer); err != nil {
+		anthropic.WriteError(c.Writer, http.StatusInternalServerError, "api_error", err.Error())
+		return
+	}
+}
+
+func mapBackendError(err error) (int, string) {
+	var upstream *backendopenai.UpstreamError
+	if !errors.As(err, &upstream) {
+		return http.StatusBadGateway, "api_error"
+	}
+	switch upstream.StatusCode {
+	case http.StatusBadRequest:
+		return http.StatusBadRequest, "invalid_request_error"
+	case http.StatusUnauthorized:
+		return http.StatusUnauthorized, "authentication_error"
+	case http.StatusForbidden:
+		return http.StatusForbidden, "permission_error"
+	case http.StatusNotFound:
+		return http.StatusNotFound, "not_found_error"
+	case http.StatusRequestEntityTooLarge:
+		return http.StatusRequestEntityTooLarge, "request_too_large"
+	case http.StatusTooManyRequests:
+		return http.StatusTooManyRequests, "rate_limit_error"
+	default:
+		return http.StatusBadGateway, "api_error"
+	}
 }
 
 // accessLog emits one slog.Debug record per request.

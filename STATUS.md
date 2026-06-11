@@ -4,8 +4,8 @@
 > 与 `DESIGN.md`（蓝图）、`CLAUDE.md`（红线）配套使用。
 > 进度有变化时**先更新本文件**，再继续干活。
 
-- **最后更新**：2026-05-10（v0.1 骨架阶段 · IR 字段冻结）
-- **当前阶段**：M0.6 · IR 已定型，准备进 M1（OpenAI passthrough）
+- **最后更新**：2026-06-08（M1 垂直切片 · Anthropic Messages 入站 → OpenAI 上游非流式闭环）
+- **当前阶段**：M1.1 · HTTP 网关已支持 `/v1/messages` 非流式请求，经 OpenAI-compatible upstream 返回 Anthropic Messages 响应；流式仍待实现
 - **owner**：@lansonsam
 - **协作模式**：人类主导 + 多 AI 助手（Cursor / Claude Code / 其他）轮流接力
 
@@ -27,9 +27,12 @@
 要点（与 New API 的关键差异）：
 
 1. **真正中性的 IR**（`UnifiedRequest/Response/Chunk`），而非用 OpenAI dto 当 IR
-2. **协议转换独立成 N×N converter**，不绑后端实现
+2. **三正交架构**：Codec（wire↔IR）+ Lens（IR→IR 原子变换）+ Backend（IR→上游），替代 N×N converter
 3. **协议层（codec）≠ 后端层（backend）**，让 Bedrock / Vertex 能复用 Anthropic / Gemini codec
-4. **零强依赖**：默认无 DB / 无 Redis / 单二进制可跑
+4. **同协议入口=出口走 raw passthrough 旁路**：byte-level 直通，零开销
+5. **嵌入式 API 已有最小入口**：`pkg/embed.TranslateJSON` 支持 `input=openai`、`output=anthropic/a社` 的请求 JSON 转义
+6. **HTTP 网关已有首条真实闭环**：`POST /v1/messages`（Anthropic Messages 非流式）→ OpenAI-compatible `/v1/chat/completions` → Anthropic Messages 响应
+7. **零强依赖**：默认无 DB / 无 Redis / 单二进制可跑
 
 ---
 
@@ -49,13 +52,16 @@
 ### 1.2 目录骨架（22 个，全部建好）
 
 ```text
-cmd/eliis/                      内容：仅 .gitkeep
-pkg/embed/                      内容：仅 .gitkeep
+cmd/eliis/                      含 main.go
+pkg/embed/                      含 embed.go（嵌入式 JSON 转义入口）
 internal/core/{contract,bus,config,types,pipeline}/    部分已写
-internal/protocol/{openai,anthropic,gemini,converter}/ 仅 .gitkeep
+internal/protocol/{openai,anthropic}/    含 dto.go + request-side codec 辅助函数
+internal/protocol/lens/                  含 ensure_max_tokens / override_model
+internal/protocol/gemini/                仅 .gitkeep
+internal/backend/                        仅 .gitkeep（M2 起逐步填充各 backend）
 internal/{router,auth,ratelimit,cache,log,metrics,failover,storage}/  仅 .gitkeep
-configs/                        仅 .gitkeep
-docs/                           仅 .gitkeep
+configs/                        含 eliis.yaml
+docs/                           含 IR.md
 test/e2e/                       仅 .gitkeep
 ```
 
@@ -73,14 +79,24 @@ test/e2e/                       仅 .gitkeep
 | `internal/core/types/unified.go` | ~220 | ✅ **IR 已定型** | 完整 IR：`UnifiedRequest/Response/Chunk` + `Message/ContentPart/ToolUseBlock/ToolResultBlock/MediaData/ToolDef/ThinkingConfig/ResponseFormat/TokenUsage` + `Role/ContentType` 枚举 |
 | `internal/core/types/context.go` | 10 | 🟡 最小 | 含 `Request *http.Request` + `RequestID string` |
 | `internal/core/contract/codec.go` | 17 | ✅ **接口已冻结** | `Codec` 接口完整：Decode/Encode Request/Response/StreamChunk |
-| `internal/core/contract/converter.go` | 11 | ✅ **接口已冻结** | `Converter` 接口：From()/To()/Convert/ConvertChunk |
+| `internal/core/contract/lens.go` | ~30 | ✅ **接口已冻结** | `Lens` 接口 + `LensChain` 辅助类型（替代旧 Converter） |
+| `internal/core/contract/backend.go` | ~25 | ✅ **接口已冻结** | `Backend` + `StreamReader` 契约，真实 backend 尚未实现 |
 | `internal/core/contract/middleware.go` | 12 | ✅ **接口已冻结** | `Middleware` + `Handler` 类型 |
 | `internal/core/bus/bus.go` | 10 | 🟡 占位 | 只有 `Bus struct{}` + `New()` |
-| `internal/core/config/config.go` | 35 | ✅ 可用 | YAML 加载实现，含 `Server.Addr` 默认值 |
+| `internal/core/config/config.go` | ~130 | ✅ 可用 | YAML 加载实现，含 `Server` / `Log` / OpenAI upstream / Anthropic route 配置默认值与 env 展开 |
 | `internal/core/pipeline/pipeline.go` | 17 | 🟡 占位 | `Pipeline.Handle()` 直接返回 nil |
-| `cmd/eliis/main.go` | ~110 | ✅ 可用 | Gin server，监听配置 addr，含 `/health` + `/`，SIGINT/SIGTERM 优雅关闭 |
-| `configs/eliis.yaml` | 9 | ✅ 可用 | 默认监听 `:8090` |
-| `docs/IR.md` | ~230 | ✅ 完整 | 三协议字段对照表 + Extra 约定 + 未决问题清单 |
+| `cmd/eliis/main.go` | ~280 | ✅ 可用 | Gin server，监听配置 addr，含 `/health` + `/` + `/v1/messages` 非流式路由，SIGINT/SIGTERM 优雅关闭 |
+| `configs/eliis.yaml` | ~35 | ✅ 可用 | 默认监听 `:8090`，含 OpenAI-compatible upstream 与 Anthropic Messages route 示例 |
+| `docs/IR.md` | ~255 | ✅ 完整 | 三协议字段对照表 + Extra 约定 + 未决问题清单 |
+| `internal/protocol/openai/dto.go` | ~340 | ✅ 完整 | OpenAI Chat Completions 协议 DTO（snapshot 2026-05），无业务方法 |
+| `internal/protocol/anthropic/dto.go` | ~330 | ✅ 完整 | Anthropic Messages API DTO（snapshot 2026-05），无业务方法 |
+| `internal/protocol/openai/codec.go` | ~700 | 🟡 非流式可用 | OpenAI Chat Completions 请求 decode/encode、响应 decode；流式仍是占位 |
+| `internal/protocol/anthropic/codec.go` | ~470 | 🟡 非流式可用 | Anthropic Messages 请求 decode/encode、响应 encode、error envelope；流式仍是占位 |
+| `internal/backend/openai/backend.go` | ~150 | ✅ 非流式可用 | OpenAI-compatible `/chat/completions` HTTP client，实现 `contract.Backend.Invoke` |
+| `internal/protocol/lens/*.go` | ~60 | ✅ 可用 | `EnsureMaxTokens` + `OverrideModel` 两个首批 request lens |
+| `pkg/embed/embed.go` | ~90 | 🟡 最小可用 | `TranslateJSON` 支持 OpenAI → Anthropic/a社 请求 JSON 转义，同协议 raw JSON 原样返回 |
+| `*_test.go` | 多个 | ✅ 可用 | 覆盖 config、OpenAI/Anthropic codec、OpenAI backend、`/v1/messages` e2e |
+| `docs/EMBED.md` | ~80 | ✅ 可用 | 嵌入式 API 调用示例与当前能力边界 |
 
 > 标记说明：✅ 可用 · 🟡 占位（需要扩展） · ❌ 未开始
 
@@ -95,24 +111,45 @@ test/e2e/                       仅 .gitkeep
 - [x] **`docs/IR.md`** —— 三协议字段对照表 + Extra 约定 + Parts/ToolCalls 不变量 ✅
 - [x] **首次 git commit** —— root-commit `3e04ad0`，骨架 + IR 一起入库 ✅
 
-### 2.2 M1 · OpenAI passthrough（最小闭环）
+### 2.2 M1 · OpenAI-compatible backend / Anthropic Messages 非流式闭环
 
-- [ ] `internal/protocol/openai/codec.go` —— 实现 `contract.Codec`
-- [ ] `internal/protocol/openai/dto.go` —— `ChatCompletionRequest` 等结构
-- [ ] `internal/backend/`（**目录还没建**，需要新增）—— OpenAI HTTP 客户端
-- [ ] `cmd/eliis/main.go` 接入 `/v1/chat/completions` 透传路由
+- [x] `internal/protocol/openai/dto.go` —— `ChatCompletionRequest` 等结构 ✅
+- [x] `internal/protocol/openai/codec.go` —— 请求 decode/encode + 非流式响应 decode ✅；流式仍待实现
+- [x] `internal/protocol/anthropic/codec.go` —— Anthropic Messages 请求 decode + 非流式响应 encode ✅；流式仍待实现
+- [x] `internal/backend/openai/` —— OpenAI-compatible HTTP 客户端，实现 `contract.Backend.Invoke` ✅
+- [x] `cmd/eliis/main.go` 接入 `/v1/messages`（Anthropic Messages 非流式入站）✅
+- [x] 配置 `upstreams.openai` + `routes.anthropic_messages`，支持 `${OPENAI_API_KEY}` env 展开 ✅
+- [x] 首批单元/e2e 测试：config、codec、backend、HTTP route ✅
+- [ ] `cmd/eliis/main.go` 接入 `/v1/chat/completions` OpenAI 入站透传路由
+- [ ] **可选**：`raw passthrough` 旁路实现（同协议直通，先 codec/backend 跑通后再加）
 
-### 2.3 M2~M4
+### 2.2.1 M0.8 · 嵌入式转义入口（已做最小闭环）
 
-见 `DESIGN.md` 第 8 节路线图。
+- [x] `pkg/embed.TranslateJSON` —— 可直接 import 包调用协议转义 ✅
+- [x] OpenAI Chat Completions 请求 JSON → OpenAI DTO → IR ✅
+- [x] Lens 链：`OverrideModel` + `EnsureMaxTokens` ✅
+- [x] IR → Anthropic Messages 请求 JSON ✅
+- [x] OpenAI-compatible 真实上游调用 —— `backend/openai.Invoke` 已支持非流式 Chat Completions ✅
+- [ ] 嵌入式 API 响应和流式转义 —— `pkg/embed` 仍只做请求 JSON 转义；HTTP 网关已有非流式响应转义
+
+### 2.3 M2~M6
+
+见 `DESIGN.md` 第 8 节路线图。要点：
+
+- M2：Anthropic codec + `backend/anthropic`
+- M3：第一次跨协议（OpenAI 入 → Anthropic 出），首批 lens 实装
+- M4：Gemini codec + `backend/gemini`，复用已有 lens
+- M5：`backend/bedrock` / `backend/vertex`（同 codec、不同 backend）
+- M6：周边模块（ratelimit / cache / metrics / failover）
 
 ### 2.4 待与 owner 对齐的开放问题
 
 - [ ] **DESIGN.md §1.3**："另一种项目"的精确定义还没填，owner 需口头补充
-- [ ] **是否新增 `internal/backend/`** 子层（codec 与 HTTP 客户端解耦，DESIGN 漏写，AI 已建议加）
+- [x] ~~**是否新增 `internal/backend/`** 子层~~ —— 已决：M0.7 三正交确立 backend 为独立一层 ✅
 - [ ] **`internal/log/` 是否改名为 `internal/logging/`**（避免和标准库 `log` 冲突）
 - [ ] **License**（MIT / Apache-2.0 / AGPL）
 - [ ] **Web 框架**：当前共识 Gin，但未在 DESIGN.md 明文写死
+- [ ] **Lens 是否需要 `ApplyChunk(*UnifiedChunk) error` 流式版本**（M3 实装时回看）
 
 ---
 
@@ -135,8 +172,15 @@ test/e2e/                       仅 .gitkeep
 | 11 | 2026-05-10 | 采样参数（Temperature/TopP/MaxTokens 等）一律用指针 | 区分"未设置"与"零值"；Temperature=0 是合法语义，零值表达不充分会导致默认值错乱 |
 | 12 | 2026-05-10 | `ToolUseBlock.Input` 用 `json.RawMessage` 而非 `map[string]any` | OpenAI tool_calls 的 arguments 是 string、Anthropic/Gemini 是 object；RawMessage 避免反复 marshal/unmarshal 失真 |
 | 13 | 2026-05-10 | `Message` 同时维护 `Parts` 和 `ToolCalls`（后者是前者的镜像） | OpenAI codec 直接读 ToolCalls 更快；Anthropic/Gemini codec 关心顺序读 Parts；invariant 由 producer 保证（未来加工厂函数封装） |
-| 14 | 2026-05-10 | `Extra` 强制用协议名前缀（`openai:` / `anthropic:` / `gemini:`） | 避免跨协议转换时键名冲突；converter 默认丢弃异协议的 Extra 键 |
+| 14 | 2026-05-10 | `Extra` 强制用协议名前缀（`openai:` / `anthropic:` / `gemini:`） | 避免跨协议转换时键名冲突；出站时由 lens（如 `drop_extra` 链）按命名空间过滤 |
 | 15 | 2026-05-10 | `UnifiedChunk.FinishReason` 用 `*string` | `nil` = 流未结束，`""` = 显式空（罕见但保留区分能力）；与 `Delta == nil` 配合识别终止 chunk |
+| 16 | 2026-05-10 | 采纳 **Codec + Lens + Backend 三正交**架构，替代原 N×N converter | N×N converter 与 IR 中性化目标自相矛盾；三正交后新增协议 = 1 codec，跨协议差异由若干原子 lens 在路由配置里 compose 解决，扩展度从 N² 降到 N+ε |
+| 17 | 2026-05-10 | 同协议入口 = 出口走 **raw passthrough 旁路**（byte-level 透传） | 网关场景独有：OpenAI→OpenAI 不需要解码到 IR 再编码回去，直通可省一次 marshal/unmarshal、保留所有 OpenAI 专属字段、零延迟开销 |
+| 18 | 2026-05-10 | **Codec 与 Backend 解耦**：同一 codec 可服务多个 backend | Anthropic codec 可同时挂直连 / Bedrock / Vertex 三个 backend；切换上游服务商时只改 backend，codec 与 lens 完全复用 |
+| 19 | 2026-05-10 | 先落地 `pkg/embed.TranslateJSON` 作为库调用最小入口 | owner 需要可直接 import 包、设置 `input=openai` / `output=a社` 的测试形态；先验证 request-side codec+lens+codec 链路，再接真实 backend |
+| 20 | 2026-05-10 | M0.8 只支持请求 JSON 转义，不伪装成真实上游调用 | 当前还没有 `backend/*` HTTP 客户端和 response/stream codec；明确边界避免把“转义可用”误解为“代理调用可用” |
+| 21 | 2026-06-08 | 首条真实 HTTP 闭环选择 Anthropic Messages 入站 → OpenAI-compatible Chat Completions 上游（非流式） | owner 想先“接入 OpenAI，看看 Claude 协议能不能用”；该路径最快验证 Claude-compatible client、IR、lens、backend、response codec 的端到端协作 |
+| 22 | 2026-06-08 | `/v1/messages` 第一版遇到 `stream:true` 明确返回 Anthropic-style `invalid_request_error`，不静默降级为非流式 | Anthropic SSE 是多事件状态机，当前 stream codec 仍占位；静默降级会让流式客户端行为不可预期，明确报错更安全可测 |
 
 ---
 
@@ -186,6 +230,9 @@ go mod graph
 # 看参考代码（可读不可写：IDE 与 shell 都能读，但 AI 不要 Edit/Write）
 Get-ChildItem 'new-api/relay/channel' -Directory
 Get-ChildItem 'eino/schema' -File
+
+# 嵌入式 API 当前文档
+Get-Content docs/EMBED.md
 ```
 
 ---

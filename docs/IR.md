@@ -2,11 +2,30 @@
 
 > 中间表示 = Eliis 内部统一的请求/响应/流式结构。
 > 三种协议（OpenAI / Anthropic / Gemini）进入 Eliis 后**必须先翻译成 IR**，
-> 出去时再从 IR 翻译成目标协议。所有 `protocol/converter/*` 都只认 IR。
+> 出去时再从 IR 翻译成目标协议。所有 `codec` 与 `lens` 都只认 IR。
 >
 > 源代码：[`internal/core/types/unified.go`](../internal/core/types/unified.go)
-> 配套接口：[`internal/core/contract/codec.go`](../internal/core/contract/codec.go)
-> 设计决策：见 `STATUS.md §3` 决策 #2、#5
+> 配套接口：[`internal/core/contract/codec.go`](../internal/core/contract/codec.go)、
+> [`internal/core/contract/lens.go`](../internal/core/contract/lens.go)
+> 设计决策：见 `STATUS.md §3` 决策 #2、#5、#16
+
+---
+
+## 当前实现状态（M0.8）
+
+当前已落地一条 request-side 验证链路：
+
+```text
+OpenAI Chat Completions JSON
+  -> openai codec decode
+  -> UnifiedRequest
+  -> LensChain(OverrideModel, EnsureMaxTokens)
+  -> anthropic codec encode
+  -> Anthropic Messages JSON
+```
+
+公开调用入口见 [`docs/EMBED.md`](./EMBED.md) 与 [`pkg/embed`](../pkg/embed)。
+这条链路只验证请求 JSON 转义；响应、流式 chunk、真实 backend 调用仍未完成。
 
 ---
 
@@ -51,8 +70,8 @@
 **IR 决策**：统一升到顶层 `UnifiedRequest.System string`。
 
 - 入站 OpenAI 时，codec 把 `messages[0]`（如果是 system）拆出来放到 `System`，剩下的进 `Messages`
-- 出站 OpenAI 时，converter 把 `System` 重新插回 `messages[0]`
-- 出站 Anthropic / Gemini 时直接对应原生字段
+- 出站 OpenAI 时，OpenAI codec 把 `System` 重新插回 `messages[0]`
+- 出站 Anthropic / Gemini 时各自 codec 直接对应原生字段
 
 ### 2.2 Tool 调用 / 结果
 
@@ -161,8 +180,8 @@
 | `"stop"`           | `stop`          | `end_turn`       | `STOP` |
 | `"length"`         | `length`        | `max_tokens`     | `MAX_TOKENS` |
 | `"tool_use"`       | `tool_calls`    | `tool_use`       | (隐式：parts 含 functionCall) |
-| `"content_filter"` | `content_filter`| (无)             | `SAFETY` |
-| `"error"`          | (无)            | (无)             | `OTHER` 等异常 |
+| `"content_filter"` | `content_filter`| `refusal`（出站 Anthropic 时） | `SAFETY` |
+| `"error"`          | (无)            | (无；走 error envelope) | `OTHER` 等异常 |
 
 ### `UnifiedChunk`
 
@@ -213,8 +232,8 @@ gemini:response_logprobs      -> *bool
 
 ### 4.3 跨协议传递规则
 
-- **同协议透传**（OpenAI → OpenAI）：`Extra` 原样保留
-- **跨协议转换**（OpenAI → Anthropic）：converter 默认**丢弃** `openai:*` 键（因为目标协议根本不认识）
+- **同协议透传**（OpenAI → OpenAI）：走 raw passthrough 旁路，`Extra` 原样保留（且根本不进 IR）
+- **跨协议转换**（OpenAI → Anthropic）：由 lens 链按命名空间过滤，例如挂一个 `drop_extra(prefix_not="anthropic:")` lens 默认丢弃异协议键
 - 如果某个 `Extra` 在多个协议都有同义概念，应考虑**升进 IR**而不是用 Extra
 
 ### 4.4 流式 chunk 的 Extra
@@ -230,7 +249,7 @@ gemini:response_logprobs      -> *bool
 
 `Message.ToolCalls` 是 `Message.Parts` 中所有 `Type == ContentTypeToolUse` 项的便利镜像。
 
-**Producer 的责任**（codec / converter）：
+**Producer 的责任**（codec / lens）：
 
 - 写入 assistant 消息时，**必须**同时维护 Parts 和 ToolCalls 两份，且内容一致
 - 工具调用顺序：以 Parts 中的顺序为准（ToolCalls 仅作快速访问）

@@ -14,3 +14,21 @@ log:
 
   # 输出格式：text（开发可读） | json（生产可观测性）
   format: json
+
+upstreams:
+  openai:
+    # OpenAI-compatible 上游 /v1 根地址；兼容 OpenAI、OpenRouter、One API 等。
+    base_url: "https://api.openai.com/v1"
+    # 从环境变量读取上游密钥，避免把 secret 写进仓库。
+    api_key: "${OPENAI_API_KEY}"
+    timeout: "120s"
+
+routes:
+  anthropic_messages:
+    # 当前 M1 垂直切片支持 Anthropic Messages 入站 -> OpenAI Chat Completions 上游。
+    backend: "openai"
+    # 非空时把入站 Claude model 改写为 OpenAI-compatible 上游模型。
+    # 例如真实 OpenAI 可设为 gpt-4.1-mini；本地兼容服务可改成它自己的模型名。
+    model: "gpt-4.1-mini"
+    # 调用方未传 max_tokens 时，为 Anthropic Messages 必填字段补默认值。
+    default_max_tokens: 1024

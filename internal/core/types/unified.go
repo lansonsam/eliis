@@ -150,11 +150,11 @@ type ResponseFormat struct {
 //
 // Mapped from:
 //   - OpenAI:    usage.{prompt_tokens, completion_tokens, total_tokens,
-//                completion_tokens_details.reasoning_tokens}
+//     completion_tokens_details.reasoning_tokens}
 //   - Anthropic: usage.{input_tokens, output_tokens,
-//                cache_read_input_tokens, cache_creation_input_tokens}
+//     cache_read_input_tokens, cache_creation_input_tokens}
 //   - Gemini:    usageMetadata.{promptTokenCount, candidatesTokenCount,
-//                totalTokenCount, thoughtsTokenCount}
+//     totalTokenCount, thoughtsTokenCount}
 //
 // TotalTokens may be zero on partial streams; consumers should compute it as
 // InputTokens + OutputTokens when needed.
